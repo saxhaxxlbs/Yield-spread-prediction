@@ -11,7 +11,22 @@ This project explores the interrelationship between finance and economics by ana
 ## Data Sources
 
 We collected a set of economic and financial data from the Federal Reserve Economic Data (FRED) and other sources using the tidyquant package in R for the past 40 years:
-Inflation Measures: Consumer Price Index (CPI): CPIAUCSL, Personal Consumption Expenditures (PCE): PCEPI, Inflation Expectations: T10YIE; Labor Market Data: Nonfarm Payrolls (NFP): PAYEMS, Unemployment Rate: UNRATE, Job Openings (Vacancies): JTSJOL, Number of Unemployed: UNEMPLOY; Federal Funds Rate: FEDFUNDS; Gross Domestic Product (GDP) Growth: A191RL1Q225SBEA; Treasury Yields: 2-Year Yield: DGS2, 10-Year Yield: DGS10; Stock Market Index - as indicator of business activity: S&P 500 Index (SPX): ^GSPC
+- Inflation Measures:
+-   Consumer Price Index (CPI): CPIAUCSL,
+-   Personal Consumption Expenditures (PCE): PCEPI,
+-   Inflation Expectations: T10YIE;
+- Labor Market Data:
+-   Nonfarm Payrolls (NFP): PAYEMS,
+-   Unemployment Rate: UNRATE,
+-   Job Openings (Vacancies): JTSJOL,
+-   Number of Unemployed: UNEMPLOY;
+- Federal Funds Rate: FEDFUNDS;
+- Gross Domestic Product (GDP) Growth: A191RL1Q225SBEA;
+- Treasury Yields:
+-   2-Year Yield: DGS2,
+-   10-Year Yield: DGS10;
+- Stock Market Index - as indicator of business activity:
+-   S&P 500 Index (SPX): ^GSPC
 
 ## Project Overview
 
