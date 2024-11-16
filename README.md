@@ -4,9 +4,9 @@
 This project explores the interrelationship between finance and economics by analyzing the term spread — the difference between the 10-year and 2-year U.S. Treasury yields—and its relationship with various economic indicators. The yield spread is a crucial metric as it reflects market expectations about the economic situation.
 
 ## Key Questions Addressed
-Is the inverted yield curve truly a predictor of recessions, or are there other underlying factors?
-How do different economic indicators, such as the Federal Funds Rate, inflation measures, labor market data, and stock market indices, influence the term spread?
-Can we build a predictive model to forecast the yield spread based on these indicators?
+- Is the inverted yield curve truly a predictor of recessions, or are there other underlying factors?
+- How do different economic indicators, such as the Federal Funds Rate, inflation measures, labor market data, and stock market indices, influence the term spread?
+- Can we build a predictive model to forecast the yield spread based on these indicators?
 
 ## Data Sources
 
