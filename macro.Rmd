@@ -1,0 +1,925 @@
+---
+title: "Analysing the US Treasury term spread and its relationship with economic indicators"
+author: "Group 1"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning = FALSE, message = FALSE, include=FALSE}
+# Load necessary libraries
+library(tidyquant)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(zoo)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(tidyr)
+library(tibble)
+library(showtext)
+library(grid)
+library(scales)
+
+# Set up Montserrat font
+font_add_google("Montserrat", "montserrat")
+showtext_auto()
+
+```
+
+
+# Getting Data
+
+```{r, warning = FALSE, message = FALSE}
+# Define the start date for data collection, ensuring a consistent timeframe for all datasets
+main_start_date <- as.Date("1984-01-01")
+
+# Step 1: Fetch Economic Data from FRED
+
+# CPI: Fetch Consumer Price Index data, calculate Year-over-Year (YoY) growth, and filter from the start date
+cpi <- tq_get("CPIAUCSL", get = "economic.data", from = main_start_date - years(1)) %>%
+  rename(cpi_price = price) %>%
+  mutate(cpi_yoy = (cpi_price / lag(cpi_price, 12) - 1) * 100) %>%
+  filter(date >= main_start_date)
+
+# PCE: Fetch Personal Consumption Expenditures Index, calculate YoY growth, and filter from the start date
+pce <- tq_get("PCEPI", get = "economic.data", from = main_start_date - years(1)) %>%
+  rename(pce_price = price) %>%
+  mutate(pce_yoy = (pce_price / lag(pce_price, 12) - 1) * 100) %>%
+  filter(date >= main_start_date)
+
+# Nonfarm Payrolls: Fetch employment data (total payrolls)
+nfp <- tq_get("PAYEMS", get = "economic.data", from = main_start_date) %>%
+  rename(nfp = price)
+
+# Unemployment Rate: Fetch unemployment rate data
+unrate <- tq_get("UNRATE", get = "economic.data", from = main_start_date) %>%
+  rename(unemployment_rate = price)
+
+# Vacancies: Fetch job openings data
+vacancies <- tq_get("JTSJOL", get = "economic.data", from = main_start_date) %>%
+  rename(vacancies = price)
+
+# Unemployed: Fetch the total number of unemployed individuals
+unemployed <- tq_get("UNEMPLOY", get = "economic.data", from = main_start_date) %>%
+  rename(unemployed = price)
+
+# Inflation Expectations: Fetch 10-year inflation expectation data
+inflation_exp <- tq_get("T10YIE", get = "economic.data", from = main_start_date) %>%
+  rename(inflation_expectation = price)
+
+# Federal Funds Rate: Fetch the benchmark interest rate data
+fed_rate <- tq_get("FEDFUNDS", get = "economic.data", from = main_start_date) %>%
+  rename(fed_rate = price)
+
+# GDP Growth: Fetch quarterly GDP growth data, resample to monthly, and forward-fill missing values
+gdp_growth <- tq_get("A191RL1Q225SBEA", get = "economic.data", from = main_start_date) %>%
+  rename(gdp_growth_quarterly = price) %>%
+  mutate(year = year(date), month = month(date)) %>%
+  complete(year = full_seq(year, 1), month = 1:12, fill = list(gdp_growth_quarterly = NA)) %>%
+  arrange(year, month) %>%
+  mutate(date = as.Date(paste(year, month, "01", sep = "-")),
+         gdp_growth_monthly = zoo::na.locf(gdp_growth_quarterly, na.rm = FALSE)) %>%
+  select(date, gdp_growth_monthly)
+
+# Step 2: Consolidate Economic Data
+
+# Merge all economic datasets into a single DataFrame and calculate the vacancy-to-unemployed ratio
+economic_data <- cpi %>%
+  left_join(pce, by = "date") %>%
+  left_join(nfp, by = "date") %>%
+  left_join(unrate, by = "date") %>%
+  left_join(vacancies, by = "date") %>%
+  left_join(unemployed, by = "date") %>%
+  left_join(inflation_exp, by = "date") %>%
+  left_join(fed_rate, by = "date") %>%
+  left_join(gdp_growth, by = "date") %>%
+  mutate(vacancy_unemployed_ratio = vacancies / unemployed)
+
+# Expand the data to daily frequency and forward-fill missing values
+date_range <- seq(min(economic_data$date), max(economic_data$date), by = "day")
+economic_data_daily <- data.frame(date = date_range) %>%
+  left_join(economic_data, by = "date") %>%
+  fill(everything(), .direction = "down")
+
+# Step 3: Fetch Treasury Yield Data and Calculate Spread
+
+# Fetch 2-Year and 10-Year Treasury yields, and calculate the spread
+treasury_data <- tq_get("DGS2", get = "economic.data", from = main_start_date) %>%
+  rename(tu_yield = price) %>%
+  inner_join(
+    tq_get("DGS10", get = "economic.data", from = main_start_date) %>%
+      rename(ty_yield = price),
+    by = "date"
+  ) %>%
+  mutate(spread = ty_yield - tu_yield)
+
+# Fetch S&P 500 adjusted prices
+spx <- tq_get("^GSPC", from = main_start_date, get = "stock.prices") %>%
+  select(date, spx_price = adjusted)
+
+# Fetch Russell 2000 adjusted prices
+russell <- tq_get("^RUT", from = main_start_date, get = "stock.prices") %>%
+  select(date, russell_price = adjusted)
+
+# Step 4: Merge All Data
+
+# Combine daily economic data, treasury data, and stock indices, and interpolate missing values
+final_data <- economic_data_daily %>%
+  left_join(treasury_data, by = "date") %>%
+  left_join(spx, by = "date") %>%
+  left_join(russell, by = "date") %>%
+  mutate(across(where(is.numeric), ~ na.approx(.x, na.rm = FALSE))) %>%
+  select(-contains("symbol"))
+
+# Step 5: Save the Final Dataset
+# Save the consolidated data as a CSV for further analysis
+write.csv(final_data, "final_economic_data_with_daily_treasury_and_spx_data.csv", row.names = FALSE)
+
+
+```
+
+# What is spread?
+
+```{r,fig.width=15,fig.height=8, warning = FALSE, message = FALSE}
+# Plot Treasury yields with enhanced styling and custom legend box
+ggplot(final_data, aes(x = date)) +
+
+  # Plot the 2-Year Treasury Yield with a solid purple line
+  geom_line(aes(y = tu_yield), color = "#9970ab", size = 0.8, linetype = "solid") +
+
+  # Plot the 10-Year Treasury Yield with a darker solid purple line
+  geom_line(aes(y = ty_yield), color = "#40004b", size = 0.8, linetype = "solid") +
+
+  # Add a ribbon to highlight the spread (area between the 2-Year and 10-Year yields)
+  geom_ribbon(aes(ymin = tu_yield, ymax = ty_yield), fill = "#e7d4e8", alpha = 0.5) +
+
+  # Add titles and labels for the plot
+  labs(
+    title = "Term spread is the difference in yields of bonds with different maturities but similar credit quality",  # Main title
+    subtitle = "10Y - 2Y spread of US Treasury yields",  # Subtitle
+    x = NULL,  # No x-axis label
+    y = "Yield"  # y-axis label
+  ) +
+
+  # Customize the x-axis with limits and breaks every 3 years
+  scale_x_date(
+    limits = as.Date(c("1984-01-01", "2024-12-31")), 
+    breaks = seq(as.Date("1984-01-01"), as.Date("2024-12-31"), by = "3 years"),
+    date_labels = "%Y"
+  ) +
+
+  # Format y-axis as percentages for yield values
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+
+  # Apply a clean black-and-white theme with Montserrat font
+  theme_bw(base_family = "montserrat") +
+  theme(
+    text = element_text(family = "montserrat"),  # Set font family globally
+    plot.title = element_text(size = 18, face = "bold"),  # Bold and large title
+    plot.subtitle = element_text(size = 16),  # Slightly smaller subtitle
+    axis.title.y = element_text(size = 12),  # Adjust y-axis title size
+    panel.grid.minor = element_blank(),  # Remove minor grid lines for clarity
+    legend.position = "none"  # Disable the default legend
+  ) +
+
+  # Add a custom legend box for yield lines
+  annotation_custom(grob = grobTree(
+    rectGrob(width = 1.7, height = 0.6, gp = gpar(fill = "white", col = "black")),  # Rectangle background
+    linesGrob(x = c(0, 0.25), y = c(0.6, 0.6), gp = gpar(col = "#40004b", lwd = 5)),  # 10-Year Yield line
+    textGrob("10-Year Yield", x = 0.3, y = 0.6, hjust = 0, gp = gpar(col = "#40004b", fontsize = 14, fontface = "bold", family = "montserrat")),
+    linesGrob(x = c(0, 0.25), y = c(0.4, 0.4), gp = gpar(col = "#9970ab", lwd = 5)),  # 2-Year Yield line
+    textGrob("2-Year Yield", x = 0.3, y = 0.4, hjust = 0, gp = gpar(col = "#9970ab", fontsize = 14, fontface = "bold", family = "montserrat"))
+  ), xmin = as.Date("2020-08-01"), xmax = as.Date("2024-12-31"), ymin = 10, ymax = 15) +
+
+  # Annotate different spread conditions on the plot
+
+  # Normal Wide Spread (e.g., during economic expansions)
+  annotate("text", x = as.Date("2004-01-01"), y = 6, label = "Normal Wide Spread", 
+           family = "montserrat", fontface = "bold", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("2004-01-01"), xend = as.Date("2004-01-01"), y = 6, yend = 4.75, 
+           arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+
+  # Normal Narrow Spread (e.g., during pre-recession conditions)
+  annotate("text", x = as.Date("2016-07-01"), y = 4, label = "Normal Narrow Spread", 
+           family = "montserrat", fontface = "bold", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("2016-07-01"), xend = as.Date("2016-07-01"), y = 4, yend = 2.25, 
+           arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+
+  # Inverted Spread (e.g., during recessionary signals)
+  annotate("text", x = as.Date("2023-06-01"), y = 6.5, label = "Inverted Spread", 
+           family = "montserrat", fontface = "bold", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("2023-06-01"), xend = as.Date("2023-06-01"), y = 6.5, yend = 5.25, 
+           arrow = arrow(length = unit(0.2, "cm")), color = "black")
+
+```
+# Does spread indicate health of the economy?
+
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+ggplot(final_data, aes(x = date)) +
+
+  # Add GDP growth as narrower columns with dynamic fill based on positive or negative growth
+  geom_col(aes(y = gdp_growth_monthly, fill = gdp_growth_monthly < 0), width = 1, alpha = 0.7) +
+
+  # Highlight periods of negative spread using a filled area below the x-axis
+  geom_area(data = final_data %>% filter(spread < 0), aes(y = spread), fill = "#d73027", alpha = 0.5) +
+
+  # Plot the term spread as a line
+  geom_line(aes(y = spread, color = "Spread"), size = 0.5) +
+
+  # Add plot titles and labels
+  labs(
+    x = NULL,  # No label for x-axis
+    y = NULL,  # No label for y-axis
+    title = "Historically, negative term spread has been a good predictor of recession",  # Title of the plot
+    subtitle = "Recession occurs when GDP contracts for at least two quarters",  # Subtitle explaining the context
+    fill = "GDP Growth",  # Legend title for the GDP growth categories
+    color = ""  # No title for the spread color legend
+  ) +
+
+  # Customize the fill scale for GDP growth: red for negative, blue for positive
+  scale_fill_manual(
+    values = c(`TRUE` = "#d73027", `FALSE` = "#92c5de"),  # Assign colors to TRUE (negative) and FALSE (positive)
+    labels = c(`TRUE` = "Negative GDP growth", `FALSE` = "Positive GDP growth")  # Legend labels for the fill categories
+  ) +
+
+  # Customize the color for the term spread line
+  scale_color_manual(values = c("Spread" = "#053061")) +
+
+  # Set x-axis to show labels every 2 years
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+
+  # Format the y-axis labels as percentages for easier interpretation
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+
+  # Set the y-axis limits to range from -5% to 5% while keeping the underlying data unchanged
+  coord_cartesian(ylim = c(-5, 5)) +
+
+  # Apply a clean and professional theme
+  theme_bw(base_family = "montserrat") +  # Use Montserrat font with black-and-white theme
+  theme(
+    legend.position = "bottom",  # Position the legend below the plot
+    legend.title = element_blank(),  # Remove the legend title
+    plot.title = element_text(size = 18, face = "bold", hjust = 0, color = "black"),  # Bold and large title, left-aligned
+    plot.subtitle = element_text(size = 16, hjust = 0, color = "black"),  # Slightly smaller subtitle, left-aligned
+    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 10)  # Horizontal x-axis labels with adjusted size
+  ) +
+
+  # Annotate historical recessions with text labels and arrows
+
+  # Annotate the Gulf War Recession
+  annotate("text", x = as.Date("1990-04-01"), y = -4.9, label = "The Gulf War Recession", 
+           family = "montserrat", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("1990-04-01"), xend = as.Date("1990-09-01"), 
+           y = -4.4, yend = -3.75, arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+
+  # Annotate the Dot-Com Recession
+  annotate("text", x = as.Date("2000-04-01"), y = -3.15, label = "Dot-Com Recession", 
+           family = "montserrat", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("2000-04-01"), xend = as.Date("2001-02-01"), 
+           y = -2.65, yend = -1.65, arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+
+  # Annotate the Global Financial Crisis
+  annotate("text", x = as.Date("2005-06-01"), y = -4.5, label = "The Global Financial Crisis", 
+           family = "montserrat", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("2006-02-01"), xend = as.Date("2008-01-01"), 
+           y = -4, yend = -2.5, arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+
+  # Annotate the COVID-19 Recession
+  annotate("text", x = as.Date("2017-07-01"), y = -4.5, label = "COVID-19 recession", 
+           family = "montserrat", color = "black", vjust = -1) +
+  annotate("segment", x = as.Date("2018-01-01"), xend = as.Date("2019-10-01"), 
+           y = -4, yend = -2.9, arrow = arrow(length = unit(0.2, "cm")), color = "black")
+
+
+
+```
+
+# Maybe it is actually interest rate path that affects spread?
+
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+ggplot(final_data, aes(x = date)) +
+
+  # Plot the Federal Funds Rate as separated vertical columns
+  geom_col(aes(y = fed_rate, fill = "Fed Funds rate"), alpha = 0.5, width = 1) +
+
+  # Add a smoothed line for the Spread (difference between long- and short-term rates)
+  geom_smooth(aes(y = spread, color = "Spread"), method = "loess", span = 0.02, se = FALSE, 
+              size = 0.7, linetype = "solid") +
+
+  # Add plot titles and labels for context and clarity
+  labs(
+    x = "",  # No label for x-axis
+    y = "",  # No label for y-axis
+    title = "Narrowing spread aligns with Fed rate hikes, while disinversion follows rate cuts",  # Plot title
+    subtitle = "The Fed Funds rate is the US Central Bank’s benchmark interest rate",  # Subtitle explaining the Fed rate
+    fill = "",  # Remove legend title for the fill legend
+    color = ""  # Remove legend title for the color legend
+  ) +
+
+  # Customize the fill color for the Federal Funds Rate columns
+  scale_fill_manual(values = c("Fed Funds rate" = "#80cdc1")) +
+
+  # Customize the color for the Spread line
+  scale_color_manual(values = c("Spread" = "#003c30")) +
+
+  # Adjust x-axis to show date breaks every 2 years, with no extra padding
+  scale_x_date(
+    date_breaks = "2 years",  # Show labels every 2 years
+    date_labels = "%Y",  # Format labels to display only the year
+    expand = c(0.005, 0.005)  # Remove padding on the x-axis
+  ) +
+
+  # Format y-axis labels as percentages for consistency
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+
+  # Apply a clean, minimal black-and-white theme with Montserrat font
+  theme_bw(base_family = "montserrat") +
+  theme(
+    legend.position = "bottom",  # Position the legend below the plot
+    legend.title = element_blank(),  # Remove legend titles
+    plot.title = element_text(size = 18, face = "bold", hjust = 0, color = "black"),  # Bold and large title, left-aligned
+    plot.subtitle = element_text(size = 16, hjust = 0, color = "black"),  # Slightly smaller subtitle, left-aligned
+    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 10),  # Horizontal x-axis labels with adjusted size
+    axis.text.y = element_text(size = 12)  # Adjust size of y-axis labels
+  )
+
+
+```
+
+# Does inflation data affect spread?
+
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+# Apply a 1-month lag to inflation measures
+lag_data <- final_data %>%
+  arrange(date) %>%  # Ensure data is sorted by date for accurate lagging
+  mutate(
+    # Apply a 1-month lag to Inflation Expectations, CPI YoY, and PCE YoY
+    inflation_expectation_lag = lag(inflation_expectation, 1),
+    cpi_yoy_lag = lag(cpi_yoy, 1),
+    pce_yoy_lag = lag(pce_yoy, 1)
+  )
+
+# Transform data into long format for creating a stacked column chart
+final_data_long <- lag_data %>%
+  # Select relevant columns for the visualization
+  select(date, inflation_expectation_lag, cpi_yoy_lag, pce_yoy_lag, spread) %>%
+  pivot_longer(
+    cols = c(inflation_expectation_lag, cpi_yoy_lag, pce_yoy_lag),  # Columns to transform into rows
+    names_to = "inflation_measure",  # New column for inflation measure names
+    values_to = "value"  # New column for inflation measure values
+  )
+
+# Create a stacked column chart with the spread as a line overlay
+ggplot(final_data_long, aes(x = date)) +
+
+  # Plot stacked columns for lagged Inflation Expectations, CPI YoY, and PCE YoY
+  geom_bar(
+    aes(y = value, fill = inflation_measure),  # Fill based on inflation measure
+    stat = "identity",  # Use raw values for the bar heights
+    position = position_stack(reverse = FALSE),  # Stack bars in default order
+    alpha = 0.7,  # Add transparency for visual clarity
+    width = 1,  # Maximize bar width to eliminate gaps
+    color = NA  # Remove border lines between stacked bars
+  ) +
+
+  # Add the Spread as a line overlay for comparison
+  geom_line(data = lag_data, aes(x = date, y = spread, color = "Spread"), size = 1) +
+
+  # Add plot titles and labels
+  labs(
+    x = "",  # No label for x-axis
+    y = "",  # No label for y-axis
+    title = "Inflation and Spread have negative, yet not strong, relationship",  # Main plot title
+    subtitle = "1-month lagged inflation measures with US Treasury term spread"  # Subtitle explaining context
+  ) +
+
+  # Customize colors for the stacked columns and the line
+  scale_fill_manual(
+    values = c(
+      "cpi_yoy_lag" = "#d6604d",  # Dark red for CPI
+      "inflation_expectation_lag" = "#f4a582",  # Medium orange for Inflation Expectations
+      "pce_yoy_lag" = "#fddbc7"  # Light pink for PCE
+    ),
+    labels = c(
+      "CPI YoY",  # Label for CPI
+      "Inflation Expectations",  # Label for Inflation Expectations
+      "PCE YoY"  # Label for PCE
+    )
+  ) +
+  scale_color_manual(
+    values = c("Spread" = "#67001f"),  # Dark maroon for Spread line
+    labels = c("Spread")  # Label for Spread
+  ) +
+
+  # Customize the x-axis to display years with breaks every 2 years
+  scale_x_date(
+    date_breaks = "2 year",  # Breaks every 2 years
+    date_labels = "%Y"  # Format labels to show only the year
+  ) +
+
+  # Format y-axis labels as percentages for inflation and spread values
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+
+  # Apply a clean black-and-white theme with Montserrat font
+  theme_bw(base_family = "montserrat") +
+  theme(
+    legend.position = "bottom",  # Position the legend below the plot
+    legend.title = element_blank(),  # Remove legend title
+    legend.text = element_text(size = 12),  # Adjust legend text size for readability
+    plot.title = element_text(size = 18, face = "bold", hjust = 0, color = "black"),  # Bold and large title, left-aligned
+    plot.subtitle = element_text(size = 16, hjust = 0, color = "black"),  # Slightly smaller subtitle, left-aligned
+    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 10),  # Horizontal x-axis labels with adjusted size
+    axis.text.y = element_text(size = 10)  # Adjust y-axis label size for readability
+  )
+
+```
+
+# What is the relaionship of labour market with spread?
+
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+# Filter the data to find the valid x-axis range where the spread is non-negative
+valid_x_range <- final_data %>%
+  filter(spread >= 0) %>%  # Include only rows where spread >= 0
+  summarize(
+    min_x = min(vacancy_unemployed_ratio, na.rm = TRUE),  # Find the minimum VU ratio
+    max_x = max(vacancy_unemployed_ratio, na.rm = TRUE)   # Find the maximum VU ratio
+  )
+
+# Create a scatter plot of VU ratio vs Spread with custom styling
+ggplot(final_data, aes(x = vacancy_unemployed_ratio, y = spread)) +
+
+  # Add jittered points to reduce overplotting, with semi-transparency and a light blue color
+  geom_jitter(alpha = 0.6, color = "#4393c3", size = 0.8, width = 0.02, height = 0.02) +
+
+  # Add a linear trend line (method = "lm") without confidence interval shading
+  geom_smooth(method = "lm", color = "#053061", linetype = "solid", se = FALSE) +
+
+  # Add plot titles and axis labels for context
+  labs(
+    title = "Tight labor market signals inverting term spread",  # Main title
+    subtitle = "Vacancy-unemployed ratio vs US Treasury term spread (2004 Onwards)",  # Subtitle explaining the plot
+    x = "\nVU ratio",  # Label for x-axis
+    y = "Spread"  # Label for y-axis
+  ) +
+
+  # Customize the x-axis
+  scale_x_continuous(
+    limits = c(valid_x_range$min_x, valid_x_range$max_x),  # Set x-axis limits based on valid range
+    breaks = seq(valid_x_range$min_x, valid_x_range$max_x, by = 0.2),  # Add ticks every 0.2 units
+    labels = scales::number_format(accuracy = 0.01)  # Format x-axis labels to 2 decimal places
+  ) +
+
+  # Customize the y-axis
+  scale_y_continuous(
+    limits = c(-3, 3),  # Set y-axis limits from -3 to 3
+    breaks = seq(-3, 3, 0.5)  # Add ticks every 0.5 units
+  ) +
+
+  # Add an annotation to label the VU ratio with a custom position and styling
+  annotate("text", x = 1, y = -3.3, label = "VU ratio", size = 4.5, hjust = 0.5, color = "black") +
+
+  # Apply a clean black-and-white theme
+  theme_bw(base_family = "montserrat") +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0, color = "black"),  # Bold and large title, left-aligned
+    plot.subtitle = element_text(size = 16, hjust = 0, color = "black"),  # Slightly smaller subtitle, left-aligned
+    axis.title.x = element_text(size = 12),  # Adjust x-axis title size
+    axis.title.y = element_text(size = 12),  # Adjust y-axis title size
+    axis.text = element_text(size = 10),  # Adjust text size for axis labels
+    panel.grid.major = element_line(color = "gray90"),  # Light gray grid lines for major ticks
+    panel.grid.minor = element_blank()  # Remove minor grid lines for clarity
+  )
+
+
+```
+
+# Which variables have high correlation with the spread?
+
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+# Filter numeric variables and exclude irrelevant columns
+numeric_data <- final_data %>%
+  select(where(is.numeric)) %>%  # Keep only numeric columns
+  select(-tu_yield, -ty_yield, -unemployed, -vacancies, -cpi_price, -pce_price)  # Exclude columns not relevant to spread analysis
+
+# Calculate the correlation matrix using complete observations
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Create a data frame of correlations with the term spread
+cor_spread <- data.frame(
+  Variable = rownames(cor_matrix),  # Extract variable names from the correlation matrix
+  Correlation = cor_matrix[, "spread"]  # Extract correlation values with the term spread
+) %>%
+  filter(Variable != "spread") %>%  # Exclude the spread variable itself (self-correlation)
+  arrange(abs(Correlation))  # Sort by absolute correlation for better comparison
+
+# Rename variables for better readability in the plot
+variable_labels <- c(
+  "vacancy_unemployed_ratio" = "Vacancy/Unemployed Ratio",
+  "nfp" = "Non-Farm Payrolls",
+  "fed_rate" = "Federal Funds Rate",
+  "unemployment_rate" = "Unemployment Rate",
+  "spx_price" = "S&P 500 Price",
+  "russell_price" = "Russell 2000 Price",
+  "cpi_yoy" = "CPI YoY",
+  "pce_yoy" = "PCE YoY",
+  "inflation_expectation" = "Inflation Expectation",
+  "gdp_growth_monthly" = "GDP Growth"
+)
+
+# Replace variable names in the data frame with readable labels
+cor_spread <- cor_spread %>%
+  mutate(Variable = recode(Variable, !!!variable_labels)) %>%  # Apply custom labels
+  mutate(Variable = factor(Variable, levels = Variable))  # Preserve order of variables
+
+# Assign variables to economic groups for categorization in the legend
+cor_spread <- cor_spread %>%
+  mutate(Group = case_when(
+    Variable == "Vacancy/Unemployed Ratio" ~ "Labour Market",
+    Variable %in% c("Unemployment Rate", "Non-Farm Payrolls") ~ "Labour Market",
+    Variable == "Federal Funds Rate" ~ "Interest Rate",
+    Variable %in% c("S&P 500 Price", "Russell 2000 Price") ~ "Business Side",
+    Variable %in% c("CPI YoY", "PCE YoY", "Inflation Expectation") ~ "Inflation",
+    Variable == "GDP Growth" ~ "General Economy",
+    TRUE ~ "Other"
+  )) %>%
+  filter(Group != "Other")  # Exclude variables without a relevant group
+
+# Define custom colors for each variable for consistent visual representation
+graph_color_mapping <- c(
+  "Vacancy/Unemployed Ratio" = "#053061",  # Dark blue
+  "Unemployment Rate" = "#92c5de",        # Light blue
+  "Non-Farm Payrolls" = "#92c5de",        # Light blue
+  "CPI YoY" = "#67001f",                  # Dark red
+  "PCE YoY" = "#d6604d",                  # Light red
+  "Inflation Expectation" = "#d6604d",    # Light red
+  "Federal Funds Rate" = "#01665e",       # Dark green
+  "S&P 500 Price" = "#2d004b",            # Dark purple
+  "Russell 2000 Price" = "#b2abd2",       # Light purple
+  "GDP Growth" = "#fee090"                # Yellow
+)
+
+# Define group-level colors for the legend
+legend_color_mapping <- c(
+  "Labour Market" = "#053061",   # Dark blue
+  "Interest Rate" = "#01665e",   # Dark green
+  "Business Side" = "#2d004b",   # Dark purple
+  "Inflation" = "#67001f",       # Dark red
+  "General Economy" = "#fee090"  # Yellow
+)
+
+# Set order for legend categories for logical grouping
+cor_spread <- cor_spread %>%
+  mutate(Group = factor(Group, levels = c(
+    "Labour Market", "Interest Rate", "Business Side", "Inflation", "General Economy"
+  )))
+
+
+# Combine graph and legend colors into one mapping for consistency
+combined_color_mapping <- c(graph_color_mapping, legend_color_mapping)
+
+# Create a separate data frame for dummy legend entries
+legend_df <- data.frame(
+  Variable = unique(cor_spread$Variable),  # Unique variables for dummy legend
+  Correlation = rep(0, length(unique(cor_spread$Variable))),  # Dummy x values for legend entries
+  Group = cor_spread$Group[match(unique(cor_spread$Variable), cor_spread$Variable)]  # Match variable groups
+)
+
+# Generate the correlation plot
+ggplot(cor_spread, aes(x = Correlation, y = Variable, fill = Variable)) +
+  geom_col(width = 0.6, show.legend = FALSE) +  # Plot correlation bars without a legend
+  geom_col(  # Add invisible bars to create a custom legend
+    data = legend_df,
+    aes(x = Correlation, y = Variable, fill = Group),
+    width = 0,  # Invisible bars
+    show.legend = TRUE
+  ) +
+  # Customize colors for variables and legend groups
+  scale_fill_manual(
+    values = combined_color_mapping,
+    breaks = names(legend_color_mapping),  # Use group names in legend
+    labels = names(legend_color_mapping)   # Set legend labels to group names
+  ) +
+  # Add titles and labels to the plot
+  labs(
+    title = "Key predictors of term spread across economic categories",  # Main title
+    subtitle = "Correlation analysis of term spread with economic and market indicators\n",  # Subtitle for context
+    x = NULL,  # No x-axis label
+    y = NULL,  # No y-axis label
+    fill = NULL  # Remove legend title
+  ) +
+  # Apply a clean theme for better presentation
+  theme_bw(base_family = "montserrat") +
+  theme(
+    plot.title.position = "plot",    # Align title to the left
+    plot.subtitle.position = "plot", # Align subtitle to the left
+    plot.title = element_text(size = 18, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 16, hjust = 0),
+    panel.grid.major.y = element_blank(),  # Remove horizontal grid lines
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80"),  # Light gray vertical grid lines
+    panel.grid.minor.x = element_blank(),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    legend.position = "bottom",  # Place legend below the plot
+    legend.direction = "horizontal"  # Arrange legend horizontally
+  ) +
+  xlim(-0.8, 0.8)  # Set x-axis limits for correlation values
+
+```
+
+# Is correlation of SPX price with spread stable?
+
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+# Calculate the 5-day rolling correlation between SPX price and Spread
+final_data <- final_data %>%
+  arrange(date) %>%  # Ensure data is sorted by date for accurate rolling calculations
+  mutate(
+    rolling_corr = rollapply(
+      data = cbind(spx_price, spread),  # Combine SPX price and Spread into a matrix
+      width = 5,  # Window size of 5 days for rolling correlation
+      FUN = function(x) cor(x[, 1], x[, 2], use = "complete.obs"),  # Calculate correlation, ignoring missing values
+      by.column = FALSE,  # Treat data as a single unit
+      fill = NA,  # Fill edges with NA
+      align = "right"  # Align window to the right for rolling calculation
+    )
+  )
+
+# Define a custom color palette for the heatmap and reverse the order for desired visualization
+custom_colors <- rev(c(
+  "#b2182b", "#d6604d", "#f4a582", "#fddbc7",
+  "#d1e5f0", "#92c5de", "#4393c3", "#2166ac"
+))
+
+# Define custom x-axis breaks, manually excluding the year 2026
+x_breaks <- seq(from = as.Date("1984-01-01"), to = as.Date("2024-12-01"), by = "4 years")
+x_breaks <- x_breaks[x_breaks != as.Date("2026-01-01")]  # Remove 2026 from the breaks
+
+# Create a heatmap to visualize the 5-day rolling correlation between SPX price and Spread
+ggplot(final_data, aes(x = date, y = 1)) +  # Use y=1 to create a single-row heatmap
+  geom_tile(aes(fill = rolling_corr)) +  # Use tile geometry to create the heatmap
+  scale_fill_gradientn(
+    colors = custom_colors,  # Apply the reversed custom color palette
+    limits = c(-1, 1),  # Set limits for correlation values (-1 to 1)
+    na.value = "grey"  # Fill NA values with grey color
+  ) +
+  
+  # Customize x-axis with manually set breaks and exclude 2026
+  scale_x_date(
+    breaks = x_breaks,  # Apply custom breaks
+    date_labels = "%Y"  # Format labels as 4-digit years
+  ) +
+  
+  # Add titles and labels to the plot
+  labs(
+    x = NULL,  # No label for x-axis
+    y = NULL,  # No label for y-axis
+    title = "Relationship between S&P 500 and the spread is unstable",  # Main title
+    subtitle = "5-day rolling correlation between S&P 500 price and US Treasury term spread"  # Subtitle for context
+  ) +
+  
+  # Apply a minimal theme for clean visualization
+  theme_minimal(base_family = "montserrat") +
+  theme(
+    axis.text.y = element_blank(),  # Remove y-axis labels
+    axis.ticks.y = element_blank(),  # Remove y-axis ticks
+    plot.title.position = "plot",  # Align the title to the left
+    plot.subtitle.position = "plot",  # Align the subtitle to the left
+    plot.title = element_text(size = 18, face = "bold", hjust = 0),  # Customize title font size and alignment
+    plot.subtitle = element_text(size = 16, hjust = 0),  # Customize subtitle font size and alignment
+    panel.grid.major.y = element_blank(),  # Remove horizontal grid lines
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),  # Remove vertical grid lines
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(size = 12),  # Adjust x-axis label size
+    legend.text = element_text(size = 11),  # Customize legend text size
+    legend.title = element_text(size = 12, face = "bold"),  # Add bold legend title
+    legend.position = "none"  # Remove the legend from the plot
+  )
+
+```
+
+# Can we use the gathered insights to create a model useful for trading spread?
+
+```{r, warning = FALSE, message = FALSE}
+# Step 1: Filter data from 2004 onwards and create end-of-month dates
+filt_data <- final_data %>%
+  filter(date >= as.Date("2004-01-01")) %>%       # Use data from 2004 onwards
+  arrange(date) %>%                                # Ensure data is in chronological order
+  mutate(end_of_month_date = ceiling_date(date, "month") - days(1))  # Create end-of-month dates
+
+# Step 2: Data Transformation and Feature Engineering
+model_data <- filt_data %>%
+  # Calculate first differences to achieve stationarity
+  mutate(
+    diff_spread = spread - lag(spread),                       # Difference of spread
+    diff_spx_price = spx_price - lag(spx_price),              # Difference of SPX price
+    diff_cpi_yoy = cpi_yoy - lag(cpi_yoy),                    # Difference of CPI YoY
+    diff_fed_rate = fed_rate - lag(fed_rate),                 # Difference of Fed rate
+    diff_vacancy_unemployed_ratio = vacancy_unemployed_ratio - lag(vacancy_unemployed_ratio)  # Difference of vacancy/unemployment ratio
+  ) %>%
+  # Calculate rolling means to capture short-term trends (e.g., 5-day rolling mean)
+  mutate(
+    rollmean_diff_spread = rollmean(diff_spread, k = 5, fill = NA, align = "right"),   # Rolling mean of differenced spread
+    rollmean_diff_spx_price = rollmean(diff_spx_price, k = 5, fill = NA, align = "right"),  # Rolling mean of differenced SPX price
+    rollmean_diff_cpi_yoy = rollmean(diff_cpi_yoy, k = 5, fill = NA, align = "right"),      # Rolling mean of differenced CPI YoY
+    rollmean_diff_fed_rate = rollmean(diff_fed_rate, k = 5, fill = NA, align = "right"),    # Rolling mean of differenced Fed rate
+    rollmean_diff_vacancy_unemployed_ratio = rollmean(diff_vacancy_unemployed_ratio, k = 5, fill = NA, align = "right")  # Rolling mean of differenced vacancy/unemployment ratio
+  ) %>%
+  # Create lagged variables to capture autocorrelation
+  mutate(
+    lag1_diff_spread = lag(diff_spread, 1),   # Lag 1 of differenced spread
+    lag2_diff_spread = lag(diff_spread, 2),   # Lag 2 of differenced spread
+    lag1_diff_spx_price = lag(diff_spx_price, 1),  # Lag 1 of differenced SPX price
+    lag2_diff_spx_price = lag(diff_spx_price, 2),  # Lag 2 of differenced SPX price
+    lag1_diff_cpi_yoy = lag(diff_cpi_yoy, 1),      # Lag 1 of differenced CPI YoY
+    lag2_diff_cpi_yoy = lag(diff_cpi_yoy, 2),      # Lag 2 of differenced CPI YoY
+    lag1_diff_fed_rate = lag(diff_fed_rate, 1),    # Lag 1 of differenced Fed rate
+    lag2_diff_fed_rate = lag(diff_fed_rate, 2),    # Lag 2 of differenced Fed rate
+    lag1_diff_vacancy_unemployed_ratio = lag(diff_vacancy_unemployed_ratio, 1),  # Lag 1 of differenced vacancy/unemployment ratio
+    lag2_diff_vacancy_unemployed_ratio = lag(diff_vacancy_unemployed_ratio, 2)   # Lag 2 of differenced vacancy/unemployment ratio
+  ) %>%
+  # Select the relevant columns for modeling
+  select(
+    date, spread, diff_spread,                      # Include date, spread, and differenced spread
+    rollmean_diff_spread,                           # Rolling mean of differenced spread
+    lag1_diff_spread, lag2_diff_spread,             # Lagged differenced spread
+    rollmean_diff_spx_price,                        # Rolling mean of differenced SPX price
+    lag1_diff_spx_price, lag2_diff_spx_price,       # Lagged differenced SPX price
+    rollmean_diff_cpi_yoy,                          # Rolling mean of differenced CPI YoY
+    lag1_diff_cpi_yoy, lag2_diff_cpi_yoy,           # Lagged differenced CPI YoY
+    rollmean_diff_fed_rate,                         # Rolling mean of differenced Fed rate
+    lag1_diff_fed_rate, lag2_diff_fed_rate,         # Lagged differenced Fed rate
+    rollmean_diff_vacancy_unemployed_ratio,         # Rolling mean of differenced vacancy/unemployment ratio
+    lag1_diff_vacancy_unemployed_ratio, lag2_diff_vacancy_unemployed_ratio  # Lagged differenced vacancy/unemployment ratio
+  ) %>%
+  na.omit()  # Remove rows with NAs introduced by differencing and lagging
+
+# Note: 'spread' is included to reconstruct the original scale later
+
+# Step 3: Split the Data Chronologically to Avoid Data Leakage
+
+# Determine the number of rows for the training set (80% of the data)
+train_size <- floor(0.8 * nrow(model_data))
+
+# Split the data into training and test sets while preserving time order
+train_data <- model_data[1:train_size, ]       # Training data: first 80%
+test_data <- model_data[(train_size + 1):nrow(model_data), ]  # Test data: last 20%
+
+# Step 4: Train the Random Forest Model on the Training Set
+
+rf_model <- randomForest(
+  diff_spread ~ . - date - spread,  # Predict differenced spread using all other variables except date and spread
+  data = train_data,
+  ntree = 300,    # Number of trees in the forest
+  mtry = 3,       # Number of variables tried at each split
+  importance = TRUE  # Enable calculation of variable importance
+)
+
+
+# Step 5: Make Predictions on Both Training and Test Sets
+
+# In-sample predictions for the training set
+train_data <- train_data %>%
+  mutate(predicted_diff_spread = predict(rf_model, newdata = train_data))
+
+# Out-of-sample predictions for the test set
+test_data <- test_data %>%
+  mutate(predicted_diff_spread = predict(rf_model, newdata = test_data))
+
+# Step 6: Reconstruct the Predicted Spread from Differenced Predictions
+
+# For the training set
+# Retrieve the spread value just before the training period to start reconstruction
+initial_spread_train <- filt_data %>%
+  filter(date == min(train_data$date) - days(1)) %>%
+  pull(spread)
+
+# Reconstruct the predicted spread by cumulatively summing the predicted differences
+train_data <- train_data %>%
+  mutate(
+    predicted_spread = cumsum(predicted_diff_spread) + initial_spread_train,
+    actual_spread = spread  # Assign actual spread values for comparison
+  )
+
+# For the test set
+# Use the last actual spread value from the training set to ensure continuity
+last_actual_spread_train <- train_data %>%
+  slice_tail(n = 1) %>%
+  pull(actual_spread)
+
+# Reconstruct the predicted spread for the test set
+test_data <- test_data %>%
+  mutate(
+    predicted_spread = cumsum(predicted_diff_spread) + last_actual_spread_train,
+    actual_spread = spread  # Assign actual spread values for comparison
+  )
+
+# Step 7: Calculate Performance Metrics to Evaluate the Model
+
+# Training set performance metrics
+train_r_squared <- caret::R2(train_data$predicted_spread, train_data$actual_spread)  # R-squared
+train_rmse <- caret::RMSE(train_data$predicted_spread, train_data$actual_spread)     # Root Mean Squared Error
+
+# Test set performance metrics
+test_r_squared <- caret::R2(test_data$predicted_spread, test_data$actual_spread)     # R-squared
+test_rmse <- caret::RMSE(test_data$predicted_spread, test_data$actual_spread)        # Root Mean Squared Error
+
+# Print performance metrics for both sets
+cat("Training Set R-squared:", train_r_squared, "\n")
+cat("Training Set RMSE:", train_rmse, "\n")
+cat("Testing Set R-squared:", test_r_squared, "\n")
+cat("Testing Set RMSE:", test_rmse, "\n")
+
+
+```
+## Can model inform spread trading strategy?
+```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
+#Plot
+ggplot(test_data, aes(x = date)) +
+  # Highlight specific periods with subtle transparent red rectangles
+  geom_rect(
+    aes(xmin = as.Date("2022-07-05"), xmax = as.Date("2022-12-06"), ymin = -Inf, ymax = Inf),
+    fill = "#ffeddf", alpha = 0.04, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2022-12-20"), xmax = as.Date("2023-01-10"), ymin = -Inf, ymax = Inf),
+    fill = "#ffeddf", alpha = 0.04, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2023-10-01"), xmax = as.Date("2023-11-19"), ymin = -Inf, ymax = Inf),
+    fill = "#ffeddf", alpha = 0.04, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2024-01-01"), xmax = as.Date("2024-02-01"), ymin = -Inf, ymax = Inf),
+    fill = "#ffeddf", alpha = 0.04, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2024-07-12"), xmax = as.Date("2024-09-07"), ymin = -Inf, ymax = Inf),
+    fill = "#ffeddf", alpha = 0.04, inherit.aes = FALSE
+  ) +
+  # Plot actual spread as a line
+  geom_line(aes(y = actual_spread, color = "Actual Spread"), size = 1) +  
+  # Plot predicted spread as a solid line
+  geom_line(aes(y = predicted_spread, color = "Predicted Spread"), linetype = "solid", size = 1) +
+  # Add a horizontal line at zero to indicate a neutral point
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", size = 0.8) +
+  # Define plot labels and add a disclaimer
+  labs(
+    x = NULL,  # Remove x-axis label
+    y = "Yield Spread (%)",  # Label for the y-axis
+    title = "Trading on the predicted spreads may be profitable, except near reversals",  # Plot title
+    subtitle = "Out-of-sample comparison of predicted vs actual term spread - highlighted periods show strategy losses",  # Subtitle
+    caption = "\nDisclaimer: This analysis is for informational purposes only and does not represent an offer to sell or a solicitation to purchase any financial instruments."  # Disclaimer text
+  ) +
+  # Customize line colors and legend order
+  scale_color_manual(
+    values = c("Predicted Spread" = "#67001f", "Actual Spread" = "#d6604d"),
+    breaks = c("Predicted Spread", "Actual Spread")  # Specify order in the legend
+  ) +
+  # Adjust x-axis to show dates every 4 months
+  scale_x_date(date_breaks = "4 months", date_labels = "%b %Y") +
+  # Set symmetrical y-axis limits and add custom tick intervals
+  scale_y_continuous(
+    limits = c(-1.6, 1.6),  # Ensure y-axis is symmetrical
+    breaks = seq(-1.6, 1.7, by = 0.4)  # Set tick intervals
+  ) +
+  # Apply consistent visual styling
+  theme_bw() +
+  theme(
+    text = element_text(family = "montserrat"),  # Apply Montserrat font globally
+    legend.title = element_blank(),  # Remove legend title
+    plot.title = element_text(face = "bold", size = 18),  # Bold and large title
+    plot.subtitle = element_text(size = 16),  # Medium-sized subtitle
+    plot.caption = element_text(size = 12, hjust = 0),  # Left-aligned caption
+    axis.text.x = element_text(angle = 0, hjust = 0.5),  # Center x-axis text
+    axis.text.y = element_text(size = 10),  # Adjust y-axis text size
+    legend.text = element_text(size = 10)  # Adjust legend text size
+  ) +
+  # Add a framed trading rules annotation
+  annotation_custom(
+    grob = gTree(children = gList(
+      # Create a rectangle with a white background and black border
+      rectGrob(
+        x = 0.2, y = 0.2,  # Position in normalized plot coordinates
+        width = unit(0.22, "npc"), height = unit(0.25, "npc"),  # Box dimensions
+        gp = gpar(fill = "white", col = "black")  # Styling for the box
+      ),
+      # Add the trading rules text inside the rectangle
+      textGrob(
+        label = "Trading Rules:\n\nIncreasing spread in absolute value:\nSteepener trade - Short 2Y, Long 10Y\n\nDecreasing spread in absolute value:\nFlattener trade - Long 2Y, Short 10Y",
+        x = 0.11, y = 0.2,  # Position text inside the rectangle
+        just = "left",  # Left-aligned text
+        gp = gpar(col = "black", fontsize = 10, fontface = "plain", family = "montserrat")  # Text styling
+      )
+    ))
+  )
+
+```
+
