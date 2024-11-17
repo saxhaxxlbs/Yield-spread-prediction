@@ -27,6 +27,7 @@ We collected a set of economic and financial data from the Federal Reserve Econo
   - 10-Year Yield: DGS10;
 - Stock Market Index - as indicator of business activity:
   - S&P 500 Index (SPX): ^GSPC
+  - Russell 2000 Index: ^RUT
 
 ## Project Overview
 
