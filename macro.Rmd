@@ -31,8 +31,7 @@ showtext_auto()
 
 ```
 
-
-# Getting Data
+## Getting Data
 
 ```{r, warning = FALSE, message = FALSE}
 # Define the start date for data collection, ensuring a consistent timeframe for all datasets
@@ -143,7 +142,7 @@ write.csv(final_data, "final_economic_data_with_daily_treasury_and_spx_data.csv"
 
 ```
 
-# What is spread?
+## What is spread?
 
 ```{r,fig.width=15,fig.height=8, warning = FALSE, message = FALSE}
 # Plot Treasury yields with enhanced styling and custom legend box
@@ -217,7 +216,8 @@ ggplot(final_data, aes(x = date)) +
            arrow = arrow(length = unit(0.2, "cm")), color = "black")
 
 ```
-# Does spread indicate health of the economy?
+
+## Does spread indicate health of the economy?
 
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
 ggplot(final_data, aes(x = date)) +
@@ -299,7 +299,7 @@ ggplot(final_data, aes(x = date)) +
 
 ```
 
-# Maybe it is actually interest rate path that affects spread?
+## Maybe it is actually interest rate path that affects spread?
 
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
 ggplot(final_data, aes(x = date)) +
@@ -351,95 +351,120 @@ ggplot(final_data, aes(x = date)) +
 
 ```
 
-# Does inflation data affect spread?
+## Does inflation data affect spread?
 
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
-# Apply a 1-month lag to inflation measures
-lag_data <- final_data %>%
-  arrange(date) %>%  # Ensure data is sorted by date for accurate lagging
-  mutate(
-    # Apply a 1-month lag to Inflation Expectations, CPI YoY, and PCE YoY
-    inflation_expectation_lag = lag(inflation_expectation, 1),
-    cpi_yoy_lag = lag(cpi_yoy, 1),
-    pce_yoy_lag = lag(pce_yoy, 1)
-  )
-
 # Transform data into long format for creating a stacked column chart
-final_data_long <- lag_data %>%
+final_data_long <- final_data %>%
   # Select relevant columns for the visualization
-  select(date, inflation_expectation_lag, cpi_yoy_lag, pce_yoy_lag, spread) %>%
+  select(date, inflation_expectation, cpi_yoy, pce_yoy, spread) %>%
   pivot_longer(
-    cols = c(inflation_expectation_lag, cpi_yoy_lag, pce_yoy_lag),  # Columns to transform into rows
+    cols = c(inflation_expectation, cpi_yoy, pce_yoy),  # Columns to transform into rows
     names_to = "inflation_measure",  # New column for inflation measure names
     values_to = "value"  # New column for inflation measure values
   )
 
-# Create a stacked column chart with the spread as a line overlay
 ggplot(final_data_long, aes(x = date)) +
+  # Highlight specific periods with transparent grey rectangles to emphasize periods of interest
+  geom_rect(
+    aes(xmin = as.Date("1984-01-01"), xmax = as.Date("1987-01-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("1988-04-01"), xmax = as.Date("1991-10-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("1998-04-01"), xmax = as.Date("1999-01-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2000-02-01"), xmax = as.Date("2002-06-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2002-01-01"), xmax = as.Date("2006-08-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2008-10-01"), xmax = as.Date("2009-08-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2016-09-01"), xmax = as.Date("2020-02-01"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
+  geom_rect(
+    aes(xmin = as.Date("2021-03-01"), xmax = as.Date("2024-10-15"), ymin = -Inf, ymax = Inf),
+    fill = "#EEEDED", alpha = 0.05, inherit.aes = FALSE
+  ) +
 
-  # Plot stacked columns for lagged Inflation Expectations, CPI YoY, and PCE YoY
+  # Add stacked bar chart for inflation measures, grouped by `inflation_measure`
   geom_bar(
-    aes(y = value, fill = inflation_measure),  # Fill based on inflation measure
-    stat = "identity",  # Use raw values for the bar heights
-    position = position_stack(reverse = FALSE),  # Stack bars in default order
-    alpha = 0.7,  # Add transparency for visual clarity
-    width = 1,  # Maximize bar width to eliminate gaps
-    color = NA  # Remove border lines between stacked bars
+    aes(y = value, fill = inflation_measure),  # Map bar heights to `value` and fill to `inflation_measure`
+    stat = "identity",  # Use actual data values for bar heights
+    position = "stack",  # Stack the bars for cumulative representation
+    alpha = 0.7,  # Add transparency for better visualization
+    width = 1  # Remove gaps between bars by maximizing their width
   ) +
 
-  # Add the Spread as a line overlay for comparison
-  geom_line(data = lag_data, aes(x = date, y = spread, color = "Spread"), size = 1) +
+  # Add a line for `spread` from a different dataset for comparison
+  geom_line(data = final_data, 
+    aes(y = spread, color = "Spread"), size = 1  # Map y-values to `spread` and set line thickness
+  ) +
 
-  # Add plot titles and labels
+  # Add titles and labels for clarity and context
   labs(
-    x = "",  # No label for x-axis
-    y = "",  # No label for y-axis
-    title = "Inflation and Spread have negative, yet not strong, relationship",  # Main plot title
-    subtitle = "1-month lagged inflation measures with US Treasury term spread"  # Subtitle explaining context
+    x = "",  # No label for x-axis to maintain visual simplicity
+    y = "",  # No label for y-axis to reduce clutter
+    title = "Inflation and Spread have negative, yet not strong, relationship",  # Clear main title
+    subtitle = "Highlighted areas show periods of negative correlation"  
   ) +
 
-  # Customize colors for the stacked columns and the line
+  # Customize bar and line colors to differentiate inflation measures and spread
   scale_fill_manual(
     values = c(
-      "cpi_yoy_lag" = "#d6604d",  # Dark red for CPI
-      "inflation_expectation_lag" = "#f4a582",  # Medium orange for Inflation Expectations
-      "pce_yoy_lag" = "#fddbc7"  # Light pink for PCE
+      "cpi_yoy" = "#d6604d",  # Dark red for CPI YoY
+      "inflation_expectation" = "#f4a582",  # Medium orange for Inflation Expectations
+      "pce_yoy" = "#fddbc7"  # Light pink for PCE YoY
     ),
     labels = c(
-      "CPI YoY",  # Label for CPI
-      "Inflation Expectations",  # Label for Inflation Expectations
-      "PCE YoY"  # Label for PCE
+      "CPI YoY",  # CPI Label
+      "Inflation Expectations",  # Inflation Expectations Label
+      "PCE YoY"  # PCE Label
     )
   ) +
   scale_color_manual(
-    values = c("Spread" = "#67001f"),  # Dark maroon for Spread line
-    labels = c("Spread")  # Label for Spread
+    values = c("Spread" = "#67001f"),  # Dark maroon for the Spread line
+    labels = c("Spread")  # Label for the Spread line
   ) +
 
-  # Customize the x-axis to display years with breaks every 2 years
+  # Adjust x-axis to show every 2 years and restrict the range to match the data
   scale_x_date(
-    date_breaks = "2 year",  # Breaks every 2 years
-    date_labels = "%Y"  # Format labels to show only the year
+    date_breaks = "2 year",  # Show ticks every 2 years
+    date_labels = "%Y",  # Use year-only labels
+    limits = c(as.Date("1984-01-01"), as.Date("2024-11-30"))  # Restrict the axis range to the data
   ) +
 
-  # Format y-axis labels as percentages for inflation and spread values
-  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  # Format y-axis to display percentages
+  scale_y_continuous(labels = percent_format(scale = 1)) +
 
-  # Apply a clean black-and-white theme with Montserrat font
+  # Apply a clean and professional black-and-white theme
   theme_bw(base_family = "montserrat") +
   theme(
-    legend.position = "bottom",  # Position the legend below the plot
-    legend.title = element_blank(),  # Remove legend title
-    legend.text = element_text(size = 12),  # Adjust legend text size for readability
-    plot.title = element_text(size = 18, face = "bold", hjust = 0, color = "black"),  # Bold and large title, left-aligned
-    plot.subtitle = element_text(size = 16, hjust = 0, color = "black"),  # Slightly smaller subtitle, left-aligned
-    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 10),  # Horizontal x-axis labels with adjusted size
-    axis.text.y = element_text(size = 10)  # Adjust y-axis label size for readability
+    legend.position = "bottom",  # Position legend below the plot for better layout
+    legend.title = element_blank(),  # Remove legend title for simplicity
+    legend.text = element_text(size = 12),  # Increase legend text size for readability
+    plot.title = element_text(size = 18, face = "bold", hjust = 0, color = "black"),  # Bold and prominent main title
+    plot.subtitle = element_text(size = 16, hjust = 0, color = "black"),  # Slightly smaller subtitle
+    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 10),  # Horizontal x-axis labels
+    axis.text.y = element_text(size = 10)  # Maintain uniform y-axis label size
   )
 
 ```
 
-# What is the relaionship of labour market with spread?
+
+## What is the relaionship of labour market with spread?
 
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
 # Filter the data to find the valid x-axis range where the spread is non-negative
@@ -452,37 +477,40 @@ valid_x_range <- final_data %>%
 
 # Create a scatter plot of VU ratio vs Spread with custom styling
 ggplot(final_data, aes(x = vacancy_unemployed_ratio, y = spread)) +
+  
+  # Add a shaded horizontal line at y = 0
+  geom_hline(yintercept = 0, color = "gray50", linetype = "dashed", size = 0.8) +
 
   # Add jittered points to reduce overplotting, with semi-transparency and a light blue color
   geom_jitter(alpha = 0.6, color = "#4393c3", size = 0.8, width = 0.02, height = 0.02) +
-
+  
   # Add a linear trend line (method = "lm") without confidence interval shading
   geom_smooth(method = "lm", color = "#053061", linetype = "solid", se = FALSE) +
-
+  
   # Add plot titles and axis labels for context
   labs(
     title = "Tight labor market signals inverting term spread",  # Main title
-    subtitle = "Vacancy-unemployed ratio vs US Treasury term spread (2004 Onwards)",  # Subtitle explaining the plot
+    subtitle = "Vacancy-unemployed ratio vs US Treasury term spread (2004 onwards)",  # Subtitle explaining the plot
     x = "\nVU ratio",  # Label for x-axis
     y = "Spread"  # Label for y-axis
   ) +
-
+  
   # Customize the x-axis
   scale_x_continuous(
     limits = c(valid_x_range$min_x, valid_x_range$max_x),  # Set x-axis limits based on valid range
     breaks = seq(valid_x_range$min_x, valid_x_range$max_x, by = 0.2),  # Add ticks every 0.2 units
     labels = scales::number_format(accuracy = 0.01)  # Format x-axis labels to 2 decimal places
   ) +
-
-  # Customize the y-axis
+  
+  # Customize the y-axis to start at -1.5
   scale_y_continuous(
-    limits = c(-3, 3),  # Set y-axis limits from -3 to 3
-    breaks = seq(-3, 3, 0.5)  # Add ticks every 0.5 units
+    limits = c(-1.5, 3),  # Set y-axis limits from -1.5 to 3
+    breaks = seq(-1.5, 3, 0.5)  # Add ticks every 0.5 units
   ) +
-
+  
   # Add an annotation to label the VU ratio with a custom position and styling
-  annotate("text", x = 1, y = -3.3, label = "VU ratio", size = 4.5, hjust = 0.5, color = "black") +
-
+  annotate("text", x = 1, y = -1.7, label = "VU ratio", size = 4.5, hjust = 0.5, color = "black") +
+  
   # Apply a clean black-and-white theme
   theme_bw(base_family = "montserrat") +
   theme(
@@ -494,11 +522,9 @@ ggplot(final_data, aes(x = vacancy_unemployed_ratio, y = spread)) +
     panel.grid.major = element_line(color = "gray90"),  # Light gray grid lines for major ticks
     panel.grid.minor = element_blank()  # Remove minor grid lines for clarity
   )
-
-
 ```
 
-# Which variables have high correlation with the spread?
+## Which variables have high correlation with the spread?
 
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
 # Filter numeric variables and exclude irrelevant columns
@@ -589,7 +615,11 @@ legend_df <- data.frame(
   Group = cor_spread$Group[match(unique(cor_spread$Variable), cor_spread$Variable)]  # Match variable groups
 )
 
-# Generate the correlation plot
+# Add percentage column to `cor_spread` for labeling
+cor_spread <- cor_spread %>%
+  mutate(Percentage = round(abs(Correlation) * 100, 1))  # Convert correlation to percentage
+
+# Generate the correlation plot with percentages
 ggplot(cor_spread, aes(x = Correlation, y = Variable, fill = Variable)) +
   geom_col(width = 0.6, show.legend = FALSE) +  # Plot correlation bars without a legend
   geom_col(  # Add invisible bars to create a custom legend
@@ -598,6 +628,16 @@ ggplot(cor_spread, aes(x = Correlation, y = Variable, fill = Variable)) +
     width = 0,  # Invisible bars
     show.legend = TRUE
   ) +
+  # Add percentage text labels next to the bars
+  geom_text(aes(
+    label = round(Correlation, 2),  # Format as percentage
+    x = Correlation + sign(Correlation) * 0.02  # Offset text slightly outside the bar
+  ),
+  hjust = ifelse(cor_spread$Correlation > 0, -0.2, 1.2),  # Align text based on direction of bar
+  size = 4,
+  fontface = "bold",  # Make text bold for better visibility
+  color = "black"  # Use consistent text color
+  ) +  # Text size
   # Customize colors for variables and legend groups
   scale_fill_manual(
     values = combined_color_mapping,
@@ -634,7 +674,7 @@ ggplot(cor_spread, aes(x = Correlation, y = Variable, fill = Variable)) +
 
 ```
 
-# Is correlation of SPX price with spread stable?
+## Is correlation of SPX price with spread stable?
 
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
 # Calculate the 5-day rolling correlation between SPX price and Spread
@@ -839,7 +879,9 @@ cat("Testing Set RMSE:", test_rmse, "\n")
 
 
 ```
-## Can model inform spread trading strategy?
+
+## Can the model inform spread trading strategy?
+
 ```{r, fig.width=15, fig.height=8, warning = FALSE, message = FALSE}
 #Plot
 ggplot(test_data, aes(x = date)) +
@@ -876,7 +918,7 @@ ggplot(test_data, aes(x = date)) +
     y = "Yield Spread (%)",  # Label for the y-axis
     title = "Trading on the predicted spreads may be profitable, except near reversals",  # Plot title
     subtitle = "Out-of-sample comparison of predicted vs actual term spread - highlighted periods show strategy losses",  # Subtitle
-    caption = "\nDisclaimer: This analysis is for informational purposes only and does not represent an offer to sell or a solicitation to purchase any financial instruments."  # Disclaimer text
+    caption = "\nDisclaimer: This analysis is for informational purposes only and does not constitute financial advice or a recommendation to undertake any specific trading strategy."  # Disclaimer text
   ) +
   # Customize line colors and legend order
   scale_color_manual(
@@ -922,4 +964,3 @@ ggplot(test_data, aes(x = date)) +
   )
 
 ```
-
